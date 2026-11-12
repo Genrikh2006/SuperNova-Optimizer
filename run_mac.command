@@ -11,4 +11,6 @@ if [ ! -d .venv ]; then
   python3 -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install -r requirements.txt || {
     echo "Ошибка установки зависимостей."; rm -rf .venv; read -r -p "Нажмите Enter для выхода..."; exit 1; }
 fi
+# не спрашивать email при первом запуске Streamlit
+mkdir -p "$HOME/.streamlit"; [ -f "$HOME/.streamlit/credentials.toml" ] || printf '[general]\nemail = ""\n' > "$HOME/.streamlit/credentials.toml"
 exec .venv/bin/python -m streamlit run app.py

@@ -7,5 +7,7 @@ if not exist .venv (
   .venv\Scripts\python -m pip install --upgrade pip
   .venv\Scripts\python -m pip install -r requirements.txt
 )
+if not exist "%USERPROFILE%\.streamlit" mkdir "%USERPROFILE%\.streamlit"
+if not exist "%USERPROFILE%\.streamlit\credentials.toml" (echo [general]& echo email = "")> "%USERPROFILE%\.streamlit\credentials.toml"
 .venv\Scripts\python -m streamlit run app.py
 pause

@@ -36,7 +36,7 @@ def station_summary(plan: PlanResult) -> pd.DataFrame:
         rows.append({
             "Станция": st,
             "Выходов": a["spots"],
-            "Бюджет, руб": round(a["cost"], 2),
+            "Бюджет с НДС, руб": round(a["cost"], 2),
             "Доля бюджета, %": round(a["cost"] / plan.cost * 100, 1) if plan.cost else 0,
             "TRP": round(a["trp"], 2),
             "CPP, руб": round(a["cost"] / a["trp"], 2) if a["trp"] else 0,
@@ -44,6 +44,8 @@ def station_summary(plan: PlanResult) -> pd.DataFrame:
             "CPT, руб": round(a["cost"] / a["contacts"], 2) if a["contacts"] else 0,
             "Охват (оценка), %": round(plan.station_reach.get(st, 0), 1),
         })
+        if plan.volume_discounts:
+            rows[-1]["Объёмная скидка, %"] = round(plan.volume_discounts.get(st, 0) * 100, 1)
     return pd.DataFrame(rows)
 
 
@@ -56,8 +58,9 @@ def lines_frame(plan: PlanResult) -> pd.DataFrame:
         "Выходов": l.spots,
         "AQH, тыс": round(l.slot.aqh, 2),
         "Рейтинг, %": round(l.slot.rating, 3),
-        "Цена выхода, руб": round(l.slot.cost, 2),
-        "Сумма, руб": round(l.cost, 2),
+        "Цена выхода по прайсу, руб": round(l.slot.gross, 2),
+        "Цена выхода с НДС, руб": round(l.slot.cost, 2),
+        "Сумма с НДС, руб": round(l.cost, 2),
         "TRP": round(l.trp, 3),
     } for l in plan.lines])
 
@@ -99,7 +102,10 @@ def to_excel(plan: PlanResult) -> bytes:
                               "min_cost": f"Минимум бюджета для TRP {camp.target_trp}"}[camp.objective]),
         ("Метод / статус", f"{plan.method} / {plan.status}"),
         ("", ""),
-        ("Итого бюджет, руб", round(plan.cost, 2)),
+        ("НДС, %", round(camp.vat * 100, 1)),
+        ("Наценка за позицию в блоке", "да" if camp.position else "нет"),
+        ("Наценка за второй бренд / третьих лиц", "да" if camp.second_brand else "нет"),
+        ("Итого бюджет с НДС, руб", round(plan.cost, 2)),
         ("Остаток бюджета, руб", round(camp.budget - plan.cost, 2) if camp.budget else "—"),
         ("Выходов", plan.spots),
         ("TRP (GRP по ЦА)", round(plan.trp, 2)),
@@ -192,7 +198,7 @@ def to_excel(plan: PlanResult) -> bytes:
     if not df.empty:
         df["Дата"] = df["Дата"].apply(lambda x: x.strftime("%d.%m.%Y"))
     _write_df(wl, df, 1)
-    for j, w in enumerate([22, 12, 6, 14, 10, 10, 12, 16, 16, 10], 1):
+    for j, w in enumerate([22, 12, 6, 14, 10, 10, 12, 16, 16, 16, 10], 1):
         wl.column_dimensions[get_column_letter(j)].width = w
     wl.freeze_panes = "A2"
 

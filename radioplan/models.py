@@ -35,9 +35,11 @@ class Campaign:
     universe: Optional[float] = None   # размер ЦА, тыс. чел. (для перевода AQH в рейтинг)
     hours: list[int] = field(default_factory=lambda: list(range(7, 21)))
     weekdays: list[int] = field(default_factory=lambda: list(range(7)))  # 0=Пн
-    vat: float = 0.0          # НДС, доля (если цены без НДС и нужен бюджет с НДС)
+    vat: float = 0.22         # НДС, доля (цены в прайсах без НДС)
     agency_fee: float = 0.0   # агентское вознаграждение, доля
     objective: str = "trp"    # trp | reach | min_cost
+    position: bool = False    # размещение первым/последним в блоке (наценка из прайса)
+    second_brand: bool = False  # второй бренд / упоминание третьих лиц (наценка из прайса)
     target_trp: Optional[float] = None  # для objective=min_cost
 
 
@@ -48,8 +50,9 @@ class Slot:
     hour: int
     aqh: float        # тыс. чел. ЦА в среднем за 15 мин в этот час
     rating: float     # AQH % от ЦА
-    cost: float       # стоимость одного выхода (с учётом всех коэффициентов)
+    cost: float       # стоимость одного выхода к оплате (все коэффициенты, скидки, НДС)
     ub: int           # макс. выходов в этот час
+    gross: float = 0.0  # брутто по прайсу (коэффициенты без скидок и НДС) — для объёмной скидки
 
 
 @dataclass
@@ -79,6 +82,7 @@ class PlanResult:
     station_reach: dict[str, float]
     total_reach: float
     warnings: list[str] = field(default_factory=list)
+    volume_discounts: dict[str, float] = field(default_factory=dict)  # фактические объёмные скидки
 
     @property
     def cost(self) -> float:

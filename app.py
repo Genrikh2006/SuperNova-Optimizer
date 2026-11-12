@@ -8,14 +8,17 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from radioplan import Campaign, StationTerms, load_aqh, load_prices, plan, try_load_reach
-from radioplan.folder import DEFAULT_FOLDER, file_kind, find_reports, load_settings, report_info, save_settings
+import price_page
+from radioplan import Campaign, PriceStore, StationTerms, load_aqh, load_prices, plan, try_load_reach
+from radioplan.folder import (APP_DIR, DEFAULT_FOLDER, file_kind, find_reports, load_settings, report_info,
+                              save_settings)
 from radioplan.io_import import detect_universe
-from radioplan.export import lines_frame, price_template, station_summary, to_excel
+from radioplan.export import lines_frame, station_summary, to_excel
 from radioplan.models import WEEKDAY_NAMES
 from radioplan.slots import hourly_aqh
 
 DEMO = Path(__file__).parent / "examples" / "demo_data.xlsx"
+PRICE_STORE = PriceStore(APP_DIR / "prices.json")
 
 st.set_page_config(page_title="RadioPlan — оптимизация радио-графика", layout="wide")
 st.title("📻 RadioPlan — оптимизация графика выходов на радио")
@@ -56,6 +59,7 @@ def _load_reach(name: str, data: bytes) -> dict:
 settings = load_settings()
 
 with st.sidebar:
+    page = st.radio("Раздел", ["📊 Медиаплан", "💰 Прайсы"], horizontal=True, label_visibility="collapsed")
     st.header("1. Данные")
     folder = Path(st.text_input("Папка с выгрузками из SuperNova", settings.get("folder", str(DEFAULT_FOLDER)),
                                 help="Сюда кладите Excel-выгрузки отчётов AQH и прайсы. Подпапки тоже просматриваются.")
@@ -76,19 +80,13 @@ with st.sidebar:
     chosen_aqh = st.multiselect("AQH: выгрузки из папки", aqh_opts,
                                 default=saved_aqh or [f for f in aqh_opts if kinds[f] == "aqh"][:1],
                                 format_func=labels.get)
-    price_opts = ["— нет"] + [f for f in labels if kinds[f] != "aqh"]
-    saved_price = settings.get("price_file")
-    if saved_price not in price_opts or saved_price == "— нет":
-        saved_price = next((f for f in price_opts if kinds.get(f) == "price"), "— нет")
-    chosen_price = st.selectbox("Прайс: файл из папки", price_opts, index=price_opts.index(saved_price),
-                                format_func=lambda x: labels.get(x, x))
-    if chosen_aqh != settings.get("aqh_files") or chosen_price != settings.get("price_file"):
-        save_settings(aqh_files=chosen_aqh, price_file=chosen_price)
+    if chosen_aqh != settings.get("aqh_files"):
+        save_settings(aqh_files=chosen_aqh)
 
     with st.expander("Загрузить файлы вручную"):
         aqh_files = st.file_uploader("AQH (Excel/CSV)", type=["xlsx", "xls", "xlsm", "csv", "txt"],
                                      accept_multiple_files=True)
-        price_file = st.file_uploader("Прайс (Excel/CSV)", type=["xlsx", "xls", "xlsm", "csv", "txt"])
+        price_file = st.file_uploader("Прайс таблицей (необязательно; прайсы из раздела «Прайсы» важнее)", type=["xlsx", "xls", "xlsm", "csv", "txt"])
         reach_file = st.file_uploader("Охваты станций (необязательно)", type=["xlsx", "xls", "xlsm", "csv", "txt"])
     use_demo = st.checkbox("Демо-данные (вымышленные станции)", value=False)
     with st.expander("Формат файлов"):
@@ -112,6 +110,9 @@ for f in chosen_aqh:
         st.warning(f"Не удалось прочитать {f}: {e}")
 sources += [(f.name, f.getvalue()) for f in aqh_files or []]
 
+if not sources and page == "💰 Прайсы":
+    price_page.render(PRICE_STORE, [])
+    st.stop()
 if not sources:
     st.info(f"Положите Excel-выгрузку AQH из SuperNova в папку **{folder}** и нажмите «Обновить список файлов» "
             "(или загрузите файл вручную, или включите демо-данные).")
@@ -132,25 +133,19 @@ except Exception as e:  # noqa: BLE001
     st.error(f"Ошибка чтения AQH: {e}")
     st.stop()
 
-if price_file:
-    price_src = (price_file.name, price_file.getvalue())
-elif chosen_price in labels:
-    price_src = (Path(chosen_price).name, Path(chosen_price).read_bytes())
-else:
-    price_src = sources[0]
-try:
-    prices = _load_prices(*price_src)
-except Exception as e:  # noqa: BLE001
-    st.warning("Нет прайса. Выберите файл прайса в папке слева или загрузите вручную. "
-               "Шаблон под станции из выгрузки можно скачать ниже — заполните цены и положите в папку.\n\n"
-               f"Подробности: {e}")
-    st.download_button("⬇️ Шаблон прайса для этих станций", price_template(sorted(aqh.station.unique())),
-                       file_name="прайс_шаблон.xlsx")
-    st.subheader("Загруженный AQH")
-    show = hourly_aqh(aqh)
-    col = "rating" if show["rating"].notna().any() else "aqh"
-    st.dataframe(show.pivot_table(index=["station", "hour"], columns="daytype", values=col), use_container_width=True)
+if page == "💰 Прайсы":
+    price_page.render(PRICE_STORE, sorted(aqh.station.unique()))
     st.stop()
+
+prices = None
+if price_file:
+    try:
+        prices = _load_prices(price_file.name, price_file.getvalue())
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Ошибка чтения прайса из файла: {e}")
+elif use_demo:
+    prices = _load_prices(DEMO.name, DEMO.read_bytes())
+pricelists = {k: v for k, v in PRICE_STORE.load().items() if v.is_filled}
 
 reach_src = (reach_file.name, reach_file.getvalue()) if reach_file else sources[0]
 known_reach = _load_reach(*reach_src)
@@ -162,11 +157,13 @@ if len(rated) and (rated.round(1) - rated).abs().max() < 1e-9 and rated.median()
                "после запятой (2–3) или выгружайте AQH (000) в тысячах.")
 
 stations = sorted(aqh.station.unique())
-priced = set(prices.station.unique())
+priced = set(pricelists) | (set(prices.station.unique()) if prices is not None else set())
 missing = [s for s in stations if s not in priced]
 if missing:
-    st.download_button("⬇️ Шаблон прайса для этих станций", price_template(stations), file_name="прайс_шаблон.xlsx")
-    st.warning("Нет цен в прайсе для: " + ", ".join(missing) + ". Названия станций в AQH и прайсе должны совпадать.")
+    st.warning("Нет прайса для: " + ", ".join(missing) + ". Введите прайсы в разделе «💰 Прайсы» (слева вверху) — "
+               "без прайса станция в расчёт не попадёт.")
+if not priced & set(stations):
+    st.stop()
 
 # ------------------------------------------------------------------ кампания
 st.header("2. Параметры кампании")
@@ -185,8 +182,9 @@ universe = c3.number_input("Размер ЦА, тыс. чел.",
                            + (f" Найдено в файле: {detected_universe:g}." if detected_universe else ""))
 if not has_rating and not detected_universe:
     c3.caption("⚠️ Universe не найден в файле — введите размер ЦА вручную.")
-vat = c3.number_input("НДС, %", 0.0, 50.0, 0.0, help="Если цены в прайсе без НДС, а бюджет — с НДС") / 100
-fee = c4.number_input("Агентская комиссия / АВ, %", -50.0, 50.0, 0.0) / 100
+vat = c3.number_input("НДС, %", 0.0, 50.0, 22.0, help="Цены в прайсах без НДС; бюджет и стоимость считаются с НДС") / 100
+fee = c4.number_input("Агентская комиссия сверху, %", -50.0, 50.0, 0.0,
+                      help="Если агентство добавляет к стоимости свою комиссию. Скидка агентства из прайса — отдельно.") / 100
 objective = c4.selectbox("Цель", ["trp", "reach", "min_cost"],
                          format_func={"trp": "Максимум TRP за бюджет", "reach": "Максимум охвата за бюджет",
                                       "min_cost": "Минимальный бюджет для заданного TRP"}.get)
@@ -197,12 +195,14 @@ if objective == "min_cost":
 c5, c6 = st.columns([2, 3])
 hours = c5.slider("Часы выхода", 0, 24, (6, 22), help="Интервал [с; до)")
 weekdays = c6.multiselect("Дни недели", list(range(7)), default=list(range(7)), format_func=lambda d: WEEKDAY_NAMES[d])
+c7, c8 = st.columns(2)
+position = c7.checkbox("Размещение первым/последним в блоке (наценка из прайса)")
+second_brand = c8.checkbox("Второй бренд / упоминание третьих лиц (наценка из прайса)")
 
 # ------------------------------------------------------------------ условия станций
 st.header("3. Станции, скидки и ограничения")
 default_terms = pd.DataFrame([{
-    "Станция": s, "Вкл": s in priced, "Скидка, %": 0.0, "Сезон. коэф.": 1.0, "Наценка, %": 0.0,
-    "Коэф. хрон.": 1.0, "Макс. в час": 1, "Макс. в день": 12, "Мин. в день": 0,
+    "Станция": s, "Вкл": s in priced, "Доп. скидка, %": 0.0, "Макс. в час": 1, "Макс. в день": 12, "Мин. в день": 0,
     "Мин. доля бюджета, %": 0.0, "Макс. доля бюджета, %": 100.0,
     "Охват за неделю, %": known_reach.get(s),
 } for s in stations])
@@ -214,7 +214,8 @@ with st.expander("Данные AQH (просмотр)"):
     dt = st.selectbox("Тип дня", sorted(hourly.daytype.unique()))
     pivot = hourly[hourly.daytype == dt].pivot_table(index="hour", columns="station", values="aqh")
     st.line_chart(pivot)
-    st.dataframe(prices, use_container_width=True, hide_index=True)
+    if prices is not None:
+        st.dataframe(prices, use_container_width=True, hide_index=True)
 
 # ------------------------------------------------------------------ расчёт
 if st.button("🚀 Рассчитать оптимальный график", type="primary"):
@@ -229,8 +230,7 @@ if st.button("🚀 Рассчитать оптимальный график", ty
         reach_v = r["Охват за неделю, %"]
         terms[r["Станция"]] = StationTerms(
             station=r["Станция"], enabled=bool(r["Вкл"]),
-            discount=num(r["Скидка, %"], 0) / 100, seasonal=num(r["Сезон. коэф."], 1),
-            surcharge=num(r["Наценка, %"], 0) / 100, duration_coef=num(r["Коэф. хрон."], 1),
+            discount=num(r["Доп. скидка, %"], 0) / 100,
             max_spots_per_hour=int(num(r["Макс. в час"], 1)), max_spots_per_day=int(num(r["Макс. в день"], 12)),
             min_spots_per_day=int(num(r["Мин. в день"], 0)),
             min_budget_share=num(r["Мин. доля бюджета, %"], 0) / 100,
@@ -239,10 +239,11 @@ if st.button("🚀 Рассчитать оптимальный график", ty
     known = {s: t.max_reach for s, t in terms.items() if t.max_reach}
     camp = Campaign(start=start, end=end, duration_sec=int(duration), budget=float(budget),
                     universe=float(universe) or None, hours=list(range(hours[0], hours[1])),
-                    weekdays=sorted(weekdays), vat=vat, agency_fee=fee, objective=objective, target_trp=target_trp)
+                    weekdays=sorted(weekdays), vat=vat, agency_fee=fee, objective=objective, target_trp=target_trp,
+                    position=position, second_brand=second_brand)
     with st.spinner("Оптимизация..."):
         try:
-            st.session_state["plan"] = plan(aqh, prices, camp, terms, known)
+            st.session_state["plan"] = plan(aqh, prices, camp, terms, known, pricelists=pricelists)
         except Exception as e:  # noqa: BLE001
             st.error(str(e))
             st.stop()
@@ -253,7 +254,8 @@ if result:
     for w in result.warnings:
         st.warning(w)
     m = st.columns(6)
-    m[0].metric("Бюджет", f"{result.cost:,.0f} ₽".replace(",", " "))
+    m[0].metric("Бюджет с НДС", f"{result.cost / 1e6:.2f} млн ₽".replace(".", ","),
+                help=f"{result.cost:,.0f} ₽".replace(",", " "))
     m[1].metric("Выходов", result.spots)
     m[2].metric("TRP", f"{result.trp:.1f}")
     m[3].metric("CPP", f"{result.cpp:,.0f} ₽".replace(",", " "))

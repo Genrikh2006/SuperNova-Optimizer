@@ -45,9 +45,15 @@ def _price_for(prices: pd.DataFrame, station: str, weekday: int, hour: int) -> O
     return None
 
 
-def build_slots(aqh: pd.DataFrame, prices: pd.DataFrame, campaign: Campaign,
-                terms: dict[str, StationTerms]) -> tuple[list[Slot], list[str]]:
+def build_slots(aqh: pd.DataFrame, prices: Optional[pd.DataFrame], campaign: Campaign,
+                terms: dict[str, StationTerms], pricelists: Optional[dict] = None,
+                volume_disc: Optional[dict[str, float]] = None) -> tuple[list[Slot], list[str]]:
+    """Слоты. Цена берётся из прайса, введённого в программе (pricelists), иначе — из таблицы prices."""
     warnings: list[str] = []
+    pricelists = pricelists or {}
+    volume_disc = volume_disc or {}
+    if prices is None:
+        prices = pd.DataFrame(columns=["station", "daytype", "h_from", "h_to", "price", "unit"])
     hourly = hourly_aqh(aqh)
     look = _lookup_hourly(hourly)
     have_rating = hourly["rating"].notna().any()
@@ -67,6 +73,10 @@ def build_slots(aqh: pd.DataFrame, prices: pd.DataFrame, campaign: Campaign,
     for st, t in terms.items():
         if not t.enabled:
             continue
+        pl_check = pricelists.get(st)
+        if pl_check is not None and campaign.duration_sec not in {int(k) for k in pl_check.duration_coefs}:
+            warnings.append(f"{st}: в прайсе нет коэффициента для {campaign.duration_sec} сек — использован "
+                            f"{pl_check.duration_coef(campaign.duration_sec):g}. Проверьте таблицу хронометражей.")
         missing_aqh = missing_price = 0
         for day in days:
             wd = day.weekday()
@@ -80,13 +90,24 @@ def build_slots(aqh: pd.DataFrame, prices: pd.DataFrame, campaign: Campaign,
                     missing_aqh += 1
                     continue
                 aqh_v, rating_v = val
-                key = (st, wd, h)
-                if key not in price_cache:
-                    price_cache[key] = _price_for(prices, st, wd, h)
-                p = price_cache[key]
-                if p is None:
-                    missing_price += 1
-                    continue
+                pl = pricelists.get(st)
+                if pl is not None:
+                    gross = pl.gross_spot(day, h, campaign.duration_sec, campaign.position, campaign.second_brand)
+                    if gross is None:
+                        missing_price += 1
+                        continue
+                    cost = gross * pl.net_factor(volume_disc.get(st, 0.0), t.discount, campaign.vat)
+                    cost *= 1 + campaign.agency_fee
+                else:
+                    key = (st, wd, h)
+                    if key not in price_cache:
+                        price_cache[key] = _price_for(prices, st, wd, h)
+                    p = price_cache[key]
+                    if p is None:
+                        missing_price += 1
+                        continue
+                    cost = spot_price(p[0], p[1], campaign, t)
+                    gross = cost
                 if pd.isna(rating_v) or rating_v is None:
                     if campaign.universe:
                         rating_v = aqh_v / campaign.universe * 100
@@ -94,10 +115,10 @@ def build_slots(aqh: pd.DataFrame, prices: pd.DataFrame, campaign: Campaign,
                         rating_v = aqh_v
                 if pd.isna(aqh_v) or aqh_v is None:
                     aqh_v = rating_v * campaign.universe / 100 if campaign.universe else 0.0
-                cost = spot_price(p[0], p[1], campaign, t)
                 if cost <= 0 or t.max_spots_per_hour <= 0:
                     continue
-                slots.append(Slot(st, day, h, float(aqh_v), float(rating_v), float(cost), t.max_spots_per_hour))
+                slots.append(Slot(st, day, h, float(aqh_v), float(rating_v), float(cost),
+                                  t.max_spots_per_hour, float(gross)))
         total = len(days) * len(campaign.hours)
         if missing_aqh == total:
             warnings.append(f"{st}: нет данных AQH для выбранных часов — станция пропущена.")

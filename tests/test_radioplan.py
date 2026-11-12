@@ -78,7 +78,7 @@ def test_spot_price():
     t = StationTerms("x", discount=0.25, seasonal=1.2, surcharge=0.1, duration_coef=1.1)
     expected = 100 * 20 * 1.1 * 1.2 * 1.1 * 0.75 * 1.1 * 1.2
     assert spot_price(100, "sec", c, t) == pytest.approx(expected)
-    assert spot_price(5000, "spot", camp(), StationTerms("x")) == 5000
+    assert spot_price(5000, "spot", camp(vat=0.0), StationTerms("x")) == 5000
 
 
 # ---------------------------------------------------------------- оптимизация

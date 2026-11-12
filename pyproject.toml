@@ -1,0 +1,9 @@
+[project]
+name = "radioplan"
+version = "0.1.0"
+description = "Оптимизация графика выходов рекламных роликов на радио по данным AQH"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

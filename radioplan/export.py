@@ -199,3 +199,33 @@ def to_excel(plan: PlanResult) -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def price_template(stations: list[str], hours: tuple[int, int] = (6, 24)) -> bytes:
+    """Пустой прайс по станциям: строка на каждый час для Пн-Пт и Сб-Вс."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Прайс"
+    head = ["Станция", "Тип дня", "С", "До", "Цена за сек, руб"]
+    ws.append(head)
+    _style_header(ws, 1, 1, len(head))
+    for st in stations:
+        for dt in ("Пн-Пт", "Сб-Вс"):
+            for h in range(*hours):
+                ws.append([st, dt, f"{h:02d}:00", f"{(h + 1) % 24:02d}:00", None])
+    for col, w in zip("ABCDE", (28, 10, 8, 8, 18)):
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = "A2"
+    wn = wb.create_sheet("Как заполнять")
+    for line in [
+        "Заполните цену за секунду (руб) для каждого часа. Строки без цены не используются.",
+        "Можно объединять часы: одна строка «С 06:00 До 10:00» вместо четырёх.",
+        "Если цена за ролик, а не за секунду, переименуйте колонку в «Цена за ролик, руб».",
+        "Тип дня: Пн-Пт, Сб-Вс, Сб, Вс, Пн-Вс или конкретный день (Пн, Вт…).",
+        "Названия станций должны совпадать с выгрузкой из SuperNova.",
+    ]:
+        wn.append([line])
+    wn.column_dimensions["A"].width = 100
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()

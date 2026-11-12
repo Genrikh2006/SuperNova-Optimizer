@@ -198,7 +198,12 @@ def load_aqh(source: Source, sheet: Optional[str] = None, name: str = "",
         if sheet is None and isinstance(sname, str) and _norm(sname) in ("прайс", "цены", "price", "охват", "reach", "условия"):
             continue
         try:
-            frames.append(_parse_aqh_sheet(raw, default_daytype, sheet_name=str(sname)))
+            from .supernova_report import parse_crosstab
+            from .supernova_report import strict_daytype
+            sheet_dt = strict_daytype(sname) if sname != "csv" else None
+            parsed = parse_crosstab(raw, default_daytype, sheet_daytype=sheet_dt)
+            frames.append(parsed if parsed is not None
+                          else _parse_aqh_sheet(raw, default_daytype, sheet_name=str(sname)))
         except ValueError as e:
             errors.append(f"{sname}: {e}")
     if not frames:
@@ -361,6 +366,11 @@ def detect_universe(source: Source, name: str = "") -> Optional[float]:
         sheets = _read_raw(source, None, name)
     except Exception:  # noqa: BLE001
         return None
+    from .supernova_report import report_meta, universe_from_meta
+    for raw in sheets.values():
+        v = universe_from_meta(report_meta(raw))
+        if v:
+            return v
     for raw in sheets.values():
         for i in range(min(15, len(raw))):
             cells = [str(c) for c in raw.iloc[i].tolist() if c is not None and not (isinstance(c, float) and pd.isna(c))]

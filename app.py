@@ -9,8 +9,9 @@ import pandas as pd
 import streamlit as st
 
 from radioplan import Campaign, StationTerms, load_aqh, load_prices, plan, try_load_reach
+from radioplan.folder import DEFAULT_FOLDER, file_kind, find_reports, load_settings, report_info, save_settings
 from radioplan.io_import import detect_universe
-from radioplan.export import lines_frame, station_summary, to_excel
+from radioplan.export import lines_frame, price_template, station_summary, to_excel
 from radioplan.models import WEEKDAY_NAMES
 from radioplan.slots import hourly_aqh
 
@@ -26,6 +27,11 @@ def _load_aqh(files: tuple[tuple[str, bytes], ...]) -> pd.DataFrame:
     frames = [load_aqh(io.BytesIO(b), name=n) for n, b in files]
     df = pd.concat(frames, ignore_index=True)
     return df.groupby(["station", "daytype", "minute"], as_index=False).agg(aqh=("aqh", "mean"), rating=("rating", "mean"))
+
+
+@st.cache_data(show_spinner=False)
+def _kind(path: str, mtime: float) -> str:
+    return file_kind(Path(path))
 
 
 @st.cache_data(show_spinner=False)
@@ -47,18 +53,49 @@ def _load_reach(name: str, data: bytes) -> dict:
     return try_load_reach(io.BytesIO(data), name=name)
 
 
+settings = load_settings()
+
 with st.sidebar:
     st.header("1. Данные")
+    folder = Path(st.text_input("Папка с выгрузками из SuperNova", settings.get("folder", str(DEFAULT_FOLDER)),
+                                help="Сюда кладите Excel-выгрузки отчётов AQH и прайсы. Подпапки тоже просматриваются.")
+                  ).expanduser()
+    if str(folder) != settings.get("folder"):
+        save_settings(folder=str(folder))
+    files = find_reports(folder)
+    if not folder.is_dir():
+        st.caption("⚠️ Папка не найдена.")
+    elif not files:
+        st.caption("В папке пока нет Excel/CSV-файлов.")
+    if st.button("🔄 Обновить список файлов"):
+        st.cache_data.clear()
+    labels = {str(f): f"{f.relative_to(folder)}" for f in files}
+    kinds = {str(f): _kind(str(f), f.stat().st_mtime) for f in files}
+    aqh_opts = [f for f in labels if kinds[f] != "price"]
+    saved_aqh = [x for x in settings.get("aqh_files", []) if x in aqh_opts]
+    chosen_aqh = st.multiselect("AQH: выгрузки из папки", aqh_opts,
+                                default=saved_aqh or [f for f in aqh_opts if kinds[f] == "aqh"][:1],
+                                format_func=labels.get)
+    price_opts = ["— нет"] + [f for f in labels if kinds[f] != "aqh"]
+    saved_price = settings.get("price_file")
+    if saved_price not in price_opts or saved_price == "— нет":
+        saved_price = next((f for f in price_opts if kinds.get(f) == "price"), "— нет")
+    chosen_price = st.selectbox("Прайс: файл из папки", price_opts, index=price_opts.index(saved_price),
+                                format_func=lambda x: labels.get(x, x))
+    if chosen_aqh != settings.get("aqh_files") or chosen_price != settings.get("price_file"):
+        save_settings(aqh_files=chosen_aqh, price_file=chosen_price)
+
+    with st.expander("Загрузить файлы вручную"):
+        aqh_files = st.file_uploader("AQH (Excel/CSV)", type=["xlsx", "xls", "xlsm", "csv", "txt"],
+                                     accept_multiple_files=True)
+        price_file = st.file_uploader("Прайс (Excel/CSV)", type=["xlsx", "xls", "xlsm", "csv", "txt"])
+        reach_file = st.file_uploader("Охваты станций (необязательно)", type=["xlsx", "xls", "xlsm", "csv", "txt"])
     use_demo = st.checkbox("Демо-данные (вымышленные станции)", value=False)
-    aqh_files = st.file_uploader("AQH (Excel/CSV, выгрузка отчётов SuperNova)", type=["xlsx", "xls", "xlsm", "csv", "txt"],
-                                 accept_multiple_files=True)
-    price_file = st.file_uploader("Прайс (Excel/CSV). Если прайс на листе «Прайс» в файле AQH — можно не загружать",
-                                  type=["xlsx", "xls", "xlsm", "csv", "txt"])
-    reach_file = st.file_uploader("Охваты станций (необязательно)", type=["xlsx", "xls", "xlsm", "csv", "txt"])
     with st.expander("Формат файлов"):
         st.markdown(
-            "**AQH** — либо колонки `Станция | Тип дня | Время | AQH (тыс.)` [`| AQH %`], либо отчёт "
-            "«время в строках, станции в колонках» (по листу на тип дня: «Пн-Пт», «Сб», «Вс»).\n\n"
+            "**AQH** — выгрузка отчёта SuperNova в Excel как есть (шапка, `AQH%` или `AQH (000)`, "
+            "колонки `Пн-Пт` / `Сб-Вс`, станции слева). Также понимает простую таблицу "
+            "`Станция | Тип дня | Время | AQH`.\n\n"
             "**Прайс** — `Станция | Тип дня | С | До | Цена за сек` (или «Цена за ролик»).\n\n"
             "**Охват** — `Станция | Охват за неделю, %`.\n\n"
             "Пример — файл `examples/demo_data.xlsx`.")
@@ -68,14 +105,26 @@ with st.sidebar:
 sources: list[tuple[str, bytes]] = []
 if use_demo and DEMO.exists():
     sources.append((DEMO.name, DEMO.read_bytes()))
+for f in chosen_aqh:
+    try:
+        sources.append((Path(f).name, Path(f).read_bytes()))
+    except OSError as e:
+        st.warning(f"Не удалось прочитать {f}: {e}")
 sources += [(f.name, f.getvalue()) for f in aqh_files or []]
 
 if not sources:
-    st.info("Загрузите файлы AQH и прайс слева (или включите демо-данные).\n\n"
-            "Базы SuperNova в собственном формате напрямую не читаются: выгрузите из SuperNova отчёт AQH "
-            "по станциям и 15-минутным интервалам для нужной ЦА в Excel. Для анализа самих файлов базы "
-            "есть утилита `tools/inspect_supernova.py` (см. README).")
+    st.info(f"Положите Excel-выгрузку AQH из SuperNova в папку **{folder}** и нажмите «Обновить список файлов» "
+            "(или загрузите файл вручную, или включите демо-данные).")
     st.stop()
+
+infos = [report_info(Path(f)) for f in chosen_aqh]
+if infos:
+    st.dataframe(pd.DataFrame(infos), hide_index=True, use_container_width=True)
+    for key in ("База", "Целевая группа"):
+        vals = {i.get(key) for i in infos if i.get(key)}
+        if len(vals) > 1:
+            st.warning(f"Выбраны выгрузки с разными значениями «{key}»: {', '.join(sorted(vals))}. "
+                       "Данные одной станции будут усреднены — обычно нужно выбрать один файл.")
 
 try:
     aqh = _load_aqh(tuple(sources))
@@ -83,20 +132,40 @@ except Exception as e:  # noqa: BLE001
     st.error(f"Ошибка чтения AQH: {e}")
     st.stop()
 
-price_src = (price_file.name, price_file.getvalue()) if price_file else sources[0]
+if price_file:
+    price_src = (price_file.name, price_file.getvalue())
+elif chosen_price in labels:
+    price_src = (Path(chosen_price).name, Path(chosen_price).read_bytes())
+else:
+    price_src = sources[0]
 try:
     prices = _load_prices(*price_src)
 except Exception as e:  # noqa: BLE001
-    st.error(f"Ошибка чтения прайса: {e}")
+    st.warning("Нет прайса. Выберите файл прайса в папке слева или загрузите вручную. "
+               "Шаблон под станции из выгрузки можно скачать ниже — заполните цены и положите в папку.\n\n"
+               f"Подробности: {e}")
+    st.download_button("⬇️ Шаблон прайса для этих станций", price_template(sorted(aqh.station.unique())),
+                       file_name="прайс_шаблон.xlsx")
+    st.subheader("Загруженный AQH")
+    show = hourly_aqh(aqh)
+    col = "rating" if show["rating"].notna().any() else "aqh"
+    st.dataframe(show.pivot_table(index=["station", "hour"], columns="daytype", values=col), use_container_width=True)
     st.stop()
 
 reach_src = (reach_file.name, reach_file.getvalue()) if reach_file else sources[0]
 known_reach = _load_reach(*reach_src)
 
+rated = aqh["rating"].dropna()
+if len(rated) and (rated.round(1) - rated).abs().max() < 1e-9 and rated.median() < 3:
+    st.warning("AQH% в выгрузке округлён до 0,1. При значениях 0,1–1% это ошибка до десятков процентов "
+               "(0,1 и 0,2 отличаются вдвое) — оптимизация будет грубой. В SuperNova увеличьте число знаков "
+               "после запятой (2–3) или выгружайте AQH (000) в тысячах.")
+
 stations = sorted(aqh.station.unique())
 priced = set(prices.station.unique())
 missing = [s for s in stations if s not in priced]
 if missing:
+    st.download_button("⬇️ Шаблон прайса для этих станций", price_template(stations), file_name="прайс_шаблон.xlsx")
     st.warning("Нет цен в прайсе для: " + ", ".join(missing) + ". Названия станций в AQH и прайсе должны совпадать.")
 
 # ------------------------------------------------------------------ кампания
@@ -109,9 +178,10 @@ duration = c2.number_input("Хронометраж ролика, сек", 5, 120
 budget = c2.number_input("Бюджет, руб", 0.0, 1e10, 1_000_000.0, step=50_000.0, format="%.0f")
 has_rating = aqh["rating"].notna().any()
 detected_universe = _universe(tuple(sources))
-universe = c3.number_input("Размер ЦА, тыс. чел." + (" (не нужен: в данных есть AQH %)" if has_rating else ""),
-                           0.0, 1e6, 0.0 if has_rating else float(detected_universe or 1000.0), step=100.0,
-                           help="Нужен для перевода AQH (тыс.) в рейтинг (%). Берётся из отчёта SuperNova (Universe)."
+universe = c3.number_input("Размер ЦА, тыс. чел.",
+                           0.0, 1e6, float(detected_universe or (0.0 if has_rating else 1000.0)), step=100.0,
+                           help="Размер целевой группы из шапки выгрузки SuperNova. Нужен для перевода AQH% ↔ AQH (тыс.) "
+                                "и расчёта контактов/CPT."
                            + (f" Найдено в файле: {detected_universe:g}." if detected_universe else ""))
 if not has_rating and not detected_universe:
     c3.caption("⚠️ Universe не найден в файле — введите размер ЦА вручную.")
